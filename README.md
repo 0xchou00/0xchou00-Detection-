@@ -38,55 +38,249 @@ cd backend
 uvicorn main:app --reload
 ```
 
-## Linux (Debian / Ubuntu / Kali)
+## Full Linux Setup & Testing Guide (Debian / Ubuntu / Kali)
 
-Tested on:
+This workflow is written for Kali Linux and is valid for Debian/Ubuntu with the same commands.
 
-- Debian
-- Ubuntu
-- Kali Linux
-
-Step-by-step installation:
+### 1. Cloning & Initial Setup
 
 ```bash
+cd /home/kali
 git clone https://github.com/0xchou00/0xchou00-Detection-.git
-cd 0xchou00-Detection-
+cd /home/kali/0xchou00-Detection-
 git checkout fix/linux-compatibility
-chmod +x setup.sh run.sh scripts/install.sh
-./setup.sh
-./run.sh
 ```
 
-Service-based setup (systemd):
+Validate runtime versions before installing:
 
 ```bash
+python3 --version
+pip3 --version
+node --version
+npm --version
+```
+
+Recommended minimums:
+
+- Python `3.10+`
+- Node.js `18+`
+- npm `9+`
+
+### 2. System Dependencies
+
+Install base packages:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  python3 python3-venv python3-pip \
+  nodejs npm \
+  curl net-tools git ca-certificates jq
+```
+
+### 3. Environment Setup
+
+Create Python virtual environment and install backend dependencies:
+
+```bash
+cd /home/kali/0xchou00-Detection-
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Install dashboard dependencies:
+
+```bash
+cd /home/kali/0xchou00-Detection-/dashboard
+npm install
+```
+
+Critical dependencies used by runtime:
+
+- `fastapi`: API service exposing ingest/query routes
+- `uvicorn[standard]`: ASGI server for backend process
+- `httpx`: outbound HTTP client for enrichment and agent forwarding
+- `PyYAML`: rule/config parsing
+- `geoip2`: optional GeoIP enrichment
+
+### 4. Configuration
+
+Create `.env` in project root:
+
+```bash
+cd /home/kali/0xchou00-Detection-
+cat > .env <<'EOF'
+SIEM_DB_PATH=/home/kali/0xchou00-Detection-/backend/data/0xchou00-tool.db
+SIEM_ADMIN_API_KEY=siem-admin-dev-key
+SIEM_ANALYST_API_KEY=siem-analyst-dev-key
+SIEM_VIEWER_API_KEY=siem-viewer-dev-key
+SIEM_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173
+SIEM_GEOIP_DB_PATH=/home/kali/0xchou00-Detection-/backend/data/GeoLite2-City.mmdb
+ABUSEIPDB_API_KEY=
+EOF
+```
+
+Port and endpoint mapping:
+
+- Backend API: `http://127.0.0.1:8000`
+- Dashboard UI: `http://127.0.0.1:5173`
+- Dashboard -> Backend base URL: `VITE_TOOL_API_BASE` (defaults to `http://localhost:8000`)
+- Dashboard auth header: `X-API-Key` using viewer key
+
+### 5. Linking Tool with Dashboard
+
+Connection model:
+
+1. Logs are submitted to `POST /ingest` with analyst API key.
+2. Backend normalizes, enriches, detects, correlates, and stores in SQLite.
+3. Dashboard polls `GET /health`, `GET /alerts`, and `GET /logs` with viewer API key.
+
+API endpoints used by dashboard:
+
+- `GET /health`
+- `GET /alerts`
+- `GET /logs`
+
+Realistic ingest example:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/ingest \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: siem-analyst-dev-key" \
+  -d '{
+    "source_type": "firewall",
+    "lines": [
+      "Apr 21 12:00:01 sensor kernel: [UFW BLOCK] IN=eth0 OUT= MAC=00 SRC=203.0.113.55 DST=192.168.1.20 LEN=60 TOS=0x00 PREC=0x00 TTL=51 ID=20001 DF PROTO=TCP SPT=45671 DPT=22 WINDOW=64240 RES=0x00 SYN URGP=0",
+      "Apr 21 12:00:03 sensor kernel: [UFW BLOCK] IN=eth0 OUT= MAC=00 SRC=203.0.113.55 DST=192.168.1.20 LEN=60 TOS=0x00 PREC=0x00 TTL=51 ID=20002 DF PROTO=TCP SPT=45672 DPT=80 WINDOW=64240 RES=0x00 SYN URGP=0"
+    ]
+  }'
+```
+
+Expected successful response example:
+
+```json
+{
+  "processed": 2,
+  "alerts_generated": 1,
+  "ingested_at": "2026-04-21T12:00:03.000000+00:00"
+}
+```
+
+### 6. Running the Project
+
+Terminal 1 - start backend:
+
+```bash
+cd /home/kali/0xchou00-Detection-
+source .venv/bin/activate
+cd backend
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Terminal 2 - start dashboard:
+
+```bash
+cd /home/kali/0xchou00-Detection-/dashboard
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+Expected output:
+
+- Backend prints `Uvicorn running on http://0.0.0.0:8000`
+- Dashboard prints local URL including `http://localhost:5173`
+
+### 7. Testing Workflow
+
+Run API validation:
+
+```bash
+curl -sS http://127.0.0.1:8000/health -H "X-API-Key: siem-viewer-dev-key" | jq
+```
+
+Simulate ingest:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/ingest \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: siem-analyst-dev-key" \
+  -d '{"source_type":"ssh","lines":["Apr 21 12:05:00 kali sshd[14500]: Failed password for invalid user admin from 198.51.100.42 port 54221 ssh2"]}' | jq
+```
+
+Validate stored logs and alerts:
+
+```bash
+curl -sS "http://127.0.0.1:8000/logs?limit=5" -H "X-API-Key: siem-viewer-dev-key" | jq
+curl -sS "http://127.0.0.1:8000/alerts?limit=5" -H "X-API-Key: siem-viewer-dev-key" | jq
+```
+
+Dashboard verification:
+
+1. Open `http://127.0.0.1:5173`.
+2. Set API base URL to `http://127.0.0.1:8000` if needed.
+3. Use viewer key `siem-viewer-dev-key`.
+4. Confirm health card is green, logs table updates, and new alerts appear.
+
+### 8. Deployment Mode (systemd)
+
+Use bundled installer:
+
+```bash
+cd /home/kali/0xchou00-Detection-
+chmod +x setup.sh run.sh scripts/install.sh
 ./scripts/install.sh
 sudo systemctl start 0xchou00.service
 sudo systemctl start 0xchou00-agent.service
+sudo systemctl status 0xchou00.service --no-pager
+sudo systemctl status 0xchou00-agent.service --no-pager
 ```
 
-Run options:
+## Common Issues on Linux & Fixes
+
+### Permission denied on scripts
 
 ```bash
-# Backend only
-./run.sh --backend-only
-
-# Backend + dashboard + log agent
-./run.sh --with-agent
+chmod +x /home/kali/0xchou00-Detection-/setup.sh
+chmod +x /home/kali/0xchou00-Detection-/run.sh
+chmod +x /home/kali/0xchou00-Detection-/scripts/install.sh
 ```
 
-Common errors and fixes:
+### Port already in use
 
-- `python3: command not found`
-  - install Python runtime: `sudo apt-get install -y python3 python3-venv python3-pip`
-- `npm: command not found`
-  - install Node/npm: `sudo apt-get install -y nodejs npm`
-- `Dashboard dependencies are missing`
-  - run `./setup.sh` to install `dashboard/node_modules`
-- `Permission denied` when running scripts
-  - run `chmod +x setup.sh run.sh scripts/install.sh`
-- Dashboard CORS request blocked
-  - verify `SIEM_ALLOWED_ORIGINS` in `.env` contains your dashboard URL
+```bash
+sudo netstat -tulpn | grep :8000
+sudo netstat -tulpn | grep :5173
+sudo kill -9 <PID>
+```
+
+Or run dashboard on another port:
+
+```bash
+cd /home/kali/0xchou00-Detection-/dashboard
+npm run dev -- --host 0.0.0.0 --port 5174
+```
+
+### Missing dependencies
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip nodejs npm curl net-tools jq
+cd /home/kali/0xchou00-Detection-
+source .venv/bin/activate
+pip install -r requirements.txt
+cd dashboard && npm install
+```
+
+### API connection errors from dashboard
+
+Check backend health and key:
+
+```bash
+curl -sS http://127.0.0.1:8000/health -H "X-API-Key: siem-viewer-dev-key" | jq
+```
+
+If CORS fails, verify `SIEM_ALLOWED_ORIGINS` in `/home/kali/0xchou00-Detection-/.env` includes the dashboard origin.
 
 API:
 
